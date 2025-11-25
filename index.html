@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <title>人臉辨識＋姓名記錄 (相機修正版)</title>
+  <style>
+    :root{
+      --ui-gap: 16px;
+    }
+    *{ box-sizing: border-box; }
+    body{
+      margin: 0;
+      background: #000;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      height: 100vh;
+      width: 100vw;
+      font-family: system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;
+    }
+    video{
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      object-fit: contain;
+      background: #000;
+      transform: scaleX(-1); /* 鏡像顯示 */
+    }
+    canvas{
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      pointer-events: none;
+      z-index: 1;
+      transform: scaleX(-1); /* 讓框框跟畫面一起鏡像，座標就能對上 */
+    }
+
+    /* 上方 UI 面板 */
+    #ui{
+      position: relative;
+      z-index: 2;
+      text-align: left;
+      display: grid;
+      gap: var(--ui-gap);
+      padding: 10px;
+      width: min(96%, 960px);
+      color: #fff;
+      text-shadow: 0 2px 8px rgba(0,0,0,.6);
+    }
+    #status{
+      font-size: clamp(14px, 3vw, 18px);
+    }
+    #countBox{
+      font-size: clamp(16px, 3.4vw, 22px);
+      color: #ffdd47;
+    }
+    #fps{
+      font-size: 13px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: rgba(0,0,0,.45);
+      display: inline-block;
+      margin-left: 6px;
+    }
+    .name-panel{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      align-items:center;
+      font-size: 14px;
+    }
+    .name-panel input[type="text"]{
+      flex:1 1 140px;
+      min-width: 120px;
+      background:#111827;
+      color:#e5e7eb;
+      border-radius:10px;
+      border:1px solid rgba(255,255,255,.3);
+      padding:7px 10px;
+      font-size:14px;
+    }
+    .name-panel button{
+      background:#2563eb;
+      color:#fff;
+      border:none;
+      border-radius:10px;
+      padding:7px 12px;
+      font-size:14px;
+      cursor:pointer;
+      box-shadow:0 6px 16px rgba(37,99,235,.45);
+    }
+    .name-panel button.danger{
+      background:#e53935;
+      box-shadow:0 6px 16px rgba(229,57,53,.45);
+    }
+    .hint{
+      font-size: 12px;
+      color:#e5e7eb;
+      text-shadow:none;
+      background:rgba(0,0,0,.55);
+      padding:6px 8px;
+      border-radius:8px;
+      max-width: 680px;
+    }
+    #log{
+      max-height: 80px;
+      overflow-y: auto;
+      font-size: 11px;
+      line-height: 1.4;
+      padding: 4px 6px;
+      white-space: pre-line;
+      color:#cfd4ff;
+      opacity:.9;
+      background:rgba(0,0,0,.45);
+      border-radius:8px;
+    }
+
+    /* 右上角開始按鈕 */
+    #startBtn{
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      z-index: 3;
+      background: #2e7dff;
+      color: #fff;
+      font-size: clamp(13px, 2.8vw, 16px);
+      border: none;
+      border-radius: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+      box-shadow: 0 8px 20px rgba(46,125,255,.35);
+    }
+    #startBtn:active { transform: translateY(1px); }
+  </style>
+</head>
+<body>
+  <!-- 上方 UI：人數 + 狀態 + 姓名輸入 + log -->
+  <div id="ui">
+    <div id="countBox">
+      目前偵測人數：<span id="count">0</span>
+      <span id="fps">FPS --</span>
+    </div>
+    <div id="status">待機中：請按右上角「開始」啟動相機與人臉偵測</div>
+
+    <div class="name-panel">
+      <span>在畫面中對準你的臉，輸入姓名後按「記錄人臉」：</span>
+      <input id="nameInput" type="text" placeholder="例如：小明、米米" />
+      <button id="registerBtn">記錄人臉</button>
+      <button id="clearBtn" class="danger">清除本機資料</button>
+    </div>
+
+    <div class="hint">
+      ● 每個人可以記錄多次樣本，辨識會更穩定。<br>
+      ● 所有人臉資料只會存在 <code>localStorage</code>（這台裝置、這個瀏覽器），不會上傳。<br>
+      ● 下次再開這個網頁，只要偵測到人臉，就會在框框旁顯示姓名。
+    </div>
+
+    <div id="log"></div>
+  </div>
+
+  <button id="startBtn">開始</button>
+
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="canvas"></canvas>
+
+  <!-- MediaPipe CameraUtils：沿用你的「可開鏡頭」架構 -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <!-- face-api.js：做人臉偵測＋辨識 -->
+  <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+
+  <script>
+    const video   = document.getElementById("video");
+    const canvas  = document.getElementById("canvas");
+    const ctx     = canvas.getContext("2d");
+    const startBtn    = document.getElementById("startBtn");
+    const statusEl    = document.getElementById("status");
+    const countEl     = document.getElementById("count");
+    const fpsEl       = document.getElementById("fps");
+    const nameInput   = document.getElementById("nameInput");
+    const registerBtn = document.getElementById("registerBtn");
+    const clearBtn    = document.getElementById("clearBtn");
+    const logEl       = document.getElementById("log");
+
+    const MODEL_URL = './models'; // 模型資料夾（要放在跟這個 HTML 同一層）
+
+    let camera = null;
+    let modelsLoaded = false;
+    let running = false;
+
+    // 人臉資料（本機）
+    let labeledDescriptors = [];  // faceapi.LabeledFaceDescriptors[]
+    let faceMatcher = null;
+
+    // FPS
+    let lastT = performance.now();
+    let frames = 0;
+
+    function log(msg){
+      console.log(msg);
+      logEl.textContent = msg + '\n' + logEl.textContent;
+    }
+
+    function setStatus(text){
+      statusEl.textContent = text;
+    }
+
+    /* ====== Canvas 尺寸調整（HiDPI） ====== */
+    function resizeCanvas(){
+      const rect = canvas.getBoundingClientRect();
+      const dpr  = Math.max(1, window.devicePixelRatio || 1);
+      canvas.width  = Math.round(rect.width  * dpr);
+      canvas.height = Math.round(rect.height * dpr);
+      ctx.setTransform(1,0,0,1,0,0);
+      ctx.scale(dpr, dpr);
+    }
+    window.addEventListener("resize", resizeCanvas);
+    resizeCanvas();
+
+    function getDisplayedVideoRect(){
+      const viewportW = window.innerWidth;
+      const viewportH = window.innerHeight;
+      const srcW = video.videoWidth || 640;
+      const srcH = video.videoHeight || 480;
+      const viewRatio = viewportW / viewportH;
+      const srcRatio  = srcW / srcH;
+      let width, height, left, top;
+      if (srcRatio > viewRatio) {
+        width  = viewportW;
+        height = viewportW / srcRatio;
+        left = 0;
+        top  = (viewportH - height) / 2;
+      } else {
+        height = viewportH;
+        width  = viewportH * srcRatio;
+        top  = 0;
+        left = (viewportW - width) / 2;
+      }
+      return {left, top, width, height};
+    }
+
+    /* ====== 本機儲存 / 載入人臉資料 ====== */
+    function saveDescriptorsToStorage() {
+      const data = labeledDescriptors.map(ld => ({
+        label: ld.label,
+        descriptors: ld.descriptors.map(d => Array.from(d))
+      }));
+      localStorage.setItem('face-db', JSON.stringify(data));
+      log('已更新並儲存人臉資料，共 ' + labeledDescriptors.length + ' 位使用者');
+    }
+
+    function loadDescriptorsFromStorage() {
+      const raw = localStorage.getItem('face-db');
+      if (!raw) {
+        log('尚未有本機人臉資料');
+        return [];
+      }
+      try {
+        const parsed = JSON.parse(raw);
+        const result = parsed.map(p => new faceapi.LabeledFaceDescriptors(
+          p.label,
+          p.descriptors.map(d => new Float32Array(d))
+        ));
+        log('已從本機載入 ' + result.length + ' 位使用者的人臉資料');
+        return result;
+      } catch(e){
+        console.error(e);
+        log('本機人臉資料讀取錯誤，已忽略');
+        return [];
+      }
+    }
+
+    function rebuildFaceMatcher() {
+      if (labeledDescriptors.length > 0) {
+        faceMatcher = new faceapi.FaceMatcher(labeledDescriptors, 0.6); // 門檻越小越嚴格
+        log('已更新 FaceMatcher');
+      } else {
+        faceMatcher = null;
+        log('目前沒有任何註冊人臉');
+      }
+    }
+
+    /* ====== 載入 face-api 模型 ====== */
+    async function loadModels(){
+      setStatus('正在載入人臉模型，請稍候…');
+      await Promise.all([
+        faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+        faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+        faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+      ]);
+      modelsLoaded = true;
+      setStatus('模型載入完成，開始偵測');
+    }
+
+    /* ====== 擷取當前畫面的人臉 descriptor（記錄人臉用） ====== */
+    async function captureFaceDescriptor(){
+      const options = new faceapi.TinyFaceDetectorOptions({
+        inputSize: 224,
+        scoreThreshold: 0.5
+      });
+      const detection = await faceapi
+        .detectSingleFace(video, options)
+        .withFaceLandmarks()
+        .withFaceDescriptor();
+
+      if (!detection) {
+        throw new Error('沒有偵測到清楚的人臉，請再試一次（對準鏡頭、光線充足）');
+      }
+      return detection.descriptor;
+    }
+
+    /* ====== 畫出人臉框＋姓名 ====== */
+    function drawFaces(faces){
+      resizeCanvas(); // 確保尺寸正確一致
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+
+      const vW = video.videoWidth || 640;
+      const vH = video.videoHeight || 480;
+      const cRect = canvas.getBoundingClientRect();
+      const cW = cRect.width;
+      const cH = cRect.height;
+
+      const vRatio = vW / vH;
+      const cRatio = cW / cH;
+      let drawW, drawH, offsetX, offsetY;
+      if (vRatio > cRatio) {
+        drawW = cW; drawH = cW / vRatio;
+        offsetX = 0; offsetY = (cH - drawH) / 2;
+      } else {
+        drawH = cH; drawW = cH * vRatio;
+        offsetY = 0; offsetX = (cW - drawW) / 2;
+      }
+
+      // 因為我們有做 HiDPI scale，這裡用 CSS pixel 座標就好
+      faces.forEach(f => {
+        const box = f.box; // face-api 的 Box 物件
+        const x = box.x;
+        const y = box.y;
+        const w = box.width;
+        const h = box.height;
+
+        const sx = offsetX + x * (drawW / vW);
+        const sy = offsetY + y * (drawH / vH);
+        const sw = w * (drawW / vW);
+        const sh = h * (drawH / vH);
+
+        ctx.save();
+        ctx.strokeStyle = "rgba(124,245,198,0.95)";
+        ctx.lineWidth = 3;
+        ctx.fillStyle = "rgba(12, 210, 150, 0.25)";
+        ctx.fillRect(sx, sy, sw, sh);
+        ctx.strokeRect(sx, sy, sw, sh);
+
+        const label = f.label;
+        ctx.font = "14px system-ui,-apple-system,Segoe UI,Roboto";
+        const tw = ctx.measureText(label).width + 10;
+        ctx.fillStyle = "rgba(12,210,150,0.9)";
+        ctx.fillRect(sx, sy - 20, tw, 20);
+        ctx.fillStyle = "#00140E";
+        ctx.fillText(label, sx + 5, sy - 6);
+        ctx.restore();
+      });
+    }
+
+    /* ====== FPS 顯示 ====== */
+    function updateFPS(){
+      frames++;
+      const now = performance.now();
+      if (now - lastT >= 1000) {
+        fpsEl.textContent = `FPS ${frames}`;
+        frames = 0;
+        lastT = now;
+      }
+    }
+
+    /* ====== 偵測迴圈：由 MediaPipe Camera 每幀呼叫 ====== */
+    let lastDetectTime = 0;
+
+    async function detectFacesFrame(){
+      if (!running || !modelsLoaded) return;
+      const now = performance.now();
+      if (now - lastDetectTime < 180) {
+        // 限制大約 5~6 FPS，避免太吃效能
+        return;
+      }
+      lastDetectTime = now;
+
+      if (!video.videoWidth || !video.videoHeight) return;
+
+      try{
+        const options = new faceapi.TinyFaceDetectorOptions({
+          inputSize: 224,
+          scoreThreshold: 0.5
+        });
+
+        const detections = await faceapi
+          .detectAllFaces(video, options)
+          .withFaceLandmarks()
+          .withFaceDescriptors();
+
+        const faces = detections.map(det => {
+          let label = '未知';
+          if (faceMatcher) {
+            const best = faceMatcher.findBestMatch(det.descriptor);
+            label = best.toString(); // e.g. "小明 (distance: 0.43)" 或 "unknown"
+          }
+          return {
+            box: det.detection.box,
+            label,
+            score: det.detection.score
+          };
+        });
+
+        drawFaces(faces);
+        countEl.textContent = faces.length.toString();
+        updateFPS();
+      } catch(e){
+        console.error(e);
+        setStatus('偵測發生錯誤，請查看主控台');
+      }
+    }
+
+    /* ====== 開始按鈕：啟動相機 + 載入模型 ====== */
+    startBtn.addEventListener("click", async () => {
+      try {
+        if (!camera) {
+          camera = new Camera(video, {
+            onFrame: async () => {
+              await detectFacesFrame();
+            },
+            width: 640,
+            height: 480
+          });
+        }
+        setStatus("正在啟動相機…");
+        await camera.start();
+
+        // 相機成功後再載入模型（第一次）
+        if (!modelsLoaded) {
+          await loadModels();
+        } else {
+          setStatus("模型已載入，開始偵測");
+        }
+
+        running = true;
+        startBtn.disabled = true;
+      } catch(e){
+        console.error(e);
+        alert("需要相機權限，請允許相機存取，並使用 HTTPS 或 localhost 開啟本頁。");
+        setStatus("相機啟動失敗，請檢查權限與網頁位址（需 HTTPS）");
+      }
+    });
+
+    /* ====== 記錄人臉按鈕 ====== */
+    registerBtn.addEventListener("click", async () => {
+      const name = nameInput.value.trim();
+      if (!name) {
+        alert("請先輸入姓名");
+        return;
+      }
+      if (!modelsLoaded) {
+        alert("請先按右上角「開始」，讓模型載入完成，再進行記錄。");
+        return;
+      }
+      setStatus("正在擷取人臉特徵，請保持不動…");
+
+      try{
+        const descriptor = await captureFaceDescriptor();
+        const existing = labeledDescriptors.find(ld => ld.label === name);
+        if (existing) {
+          existing.descriptors.push(descriptor);
+          log(`已為 ${name} 新增一筆人臉樣本（共 ${existing.descriptors.length} 筆）`);
+        } else {
+          const newLD = new faceapi.LabeledFaceDescriptors(name, [descriptor]);
+          labeledDescriptors.push(newLD);
+          log(`已新增新使用者：${name}`);
+        }
+        saveDescriptorsToStorage();
+        rebuildFaceMatcher();
+        setStatus("成功記錄人臉：" + name);
+      } catch(e){
+        console.error(e);
+        setStatus(e.message || "擷取人臉失敗，請再試一次");
+      }
+    });
+
+    /* ====== 清除本機人臉資料 ====== */
+    clearBtn.addEventListener("click", () => {
+      if (!confirm("確定要刪除所有本機人臉資料嗎？")) return;
+      localStorage.removeItem('face-db');
+      labeledDescriptors = [];
+      rebuildFaceMatcher();
+      log("已清除所有本機人臉資料");
+      setStatus("本機資料已清除。可重新記錄人臉。");
+    });
+
+    /* ====== 初始化：先載入 localStorage 的人臉資料 ====== */
+    (function init(){
+      try{
+        labeledDescriptors = loadDescriptorsFromStorage();
+        rebuildFaceMatcher();
+      } catch(e){
+        console.error(e);
+      }
+      setStatus("待機中：請按右上角「開始」啟動相機與人臉偵測");
+    })();
+  </script>
+</body>
+</html>
